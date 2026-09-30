@@ -1,18 +1,19 @@
+import argparse
 import os, re, shutil
-import cv2
 import glob
 from collections import defaultdict
 
-WORK_DIR   = "."
-OUT_DIR = "./pruned"
-WIDTH = 30
-HEIGHT = 30
+WORK_DIR = "."
+CROP_SIZE = 32
 THRESHOLD = 0.25
+TO_DELETE_DIR = "to_delete"
 
-def extract_metadata(filename, width=None, height=None):
+def extract_metadata(filename):
     # information stored in the title
     exp = "(.*)__x([0-9]+)_y([0-9]+)_a([0-9]+)\\.(?:png|jpg)"
     match = re.search(exp, filename)
+    if match is None:
+        raise ValueError(f"Filename does not contain crop metadata: {filename}")
 
     frame_id = match.group(1)
     x = int(match.group(2))
@@ -20,18 +21,14 @@ def extract_metadata(filename, width=None, height=None):
     area = int(match.group(4)) #probably not a useful value. The area of saturation that was detected
 
 
-    if (width is None) or (height is None):
-        image = cv.imread(filename)
-        width, height = image.shape[:2]
-
     return {
         "filename": filename,
         "frame_id": frame_id,
         "x": x,
         "y": y,
         "area": area,
-        "width": width,
-        "height": height
+        "width": CROP_SIZE,
+        "height": CROP_SIZE
     }
 
 def check_overlap(img_a, img_b):
@@ -41,11 +38,7 @@ def check_overlap(img_a, img_b):
 
     # axis overlaps
     dist_x = abs(cent_a[0] - cent_b[0])
-    if dist_x == 0:
-        return 0
     dist_y = abs(cent_a[1] - cent_b[1])
-    if dist_y == 0:
-        return 0
 
     overlap_x = max(0,(img_a["width"]/2 + img_b["width"]/2) - dist_x)
     overlap_y = max(0,(img_a["height"]/2 + img_b["height"]/2) - dist_y)
@@ -60,11 +53,11 @@ def check_overlap(img_a, img_b):
 def group_frames(paths):
     if not paths:
         print(f"No images found in '{WORK_DIR}/'")
-        return
+        return []
 
     files = []
     for p in paths:
-        files.append(extract_metadata(p, WIDTH, HEIGHT))
+        files.append(extract_metadata(p))
     print("extracted metadata")
 
     groups = []
@@ -207,36 +200,45 @@ def _mis_exact(nodes, adj):
 
 
 def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(
+        description="Move overlapping crop images into a to_delete subdirectory."
+    )
+    parser.add_argument("--work-dir", default=WORK_DIR, help=f"directory containing crop images (default: {WORK_DIR})")
+    parser.add_argument("--threshold", type=float, default=THRESHOLD, help=f"maximum allowed overlap fraction (default: {THRESHOLD})")
+    args = parser.parse_args()
+
+    if not 0 <= args.threshold <= 1:
+        parser.error("--threshold must be between 0 and 1")
+
+    work_dir = os.path.abspath(args.work_dir)
+    to_delete_dir = os.path.join(work_dir, TO_DELETE_DIR)
 
     paths = sorted(
-        glob.glob(os.path.join(WORK_DIR, "*.jpg")) +
-        glob.glob(os.path.join(WORK_DIR, "*.png"))
+        glob.glob(os.path.join(work_dir, "*.jpg")) +
+        glob.glob(os.path.join(work_dir, "*.png"))
     )
     if not paths:
-        print(f"No images found in '{INPUT_DIR}/'")
+        print(f"No images found in '{work_dir}/'")
         return
 
     framegroups = group_frames(paths)
-    pruned_framegroups = []
+    paths_to_delete = []
 
-    print(f"removing overlaps of >{THRESHOLD}")
+    print(f"moving overlaps of >{args.threshold} to '{to_delete_dir}/'")
     for group in framegroups:
         keep_indices, remove_indices = remove_overlapping_squares(
             group,
             check_overlap,
-            threshold=THRESHOLD
+            threshold=args.threshold
             )
-        pruned_group = [group[i] for i in keep_indices]
-        print(f"reduced {group[0]["frame_id"]} from {len(group)} to {len(pruned_group)}")
-        pruned_framegroups.append(pruned_group)
+        paths_to_delete.extend(group[i]["filename"] for i in remove_indices)
+        print(f"reduced {group[0]['frame_id']} from {len(group)} to {len(keep_indices)}")
 
-    print("copying remaining frames")
-    for group in pruned_framegroups:
-        for frame in group:
-            path = frame["filename"]
-            filename = os.path.basename(path)
-            shutil.copy(path, f"{OUT_DIR}/{filename}")
+    os.makedirs(to_delete_dir, exist_ok=True)
+    for path in paths_to_delete:
+        shutil.move(path, os.path.join(to_delete_dir, os.path.basename(path)))
+
+    print(f"\nDone. Kept {len(paths) - len(paths_to_delete)} frames in '{work_dir}/'; moved {len(paths_to_delete)} to '{to_delete_dir}/'.")
 
 if __name__ == "__main__":
     main()
