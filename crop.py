@@ -5,8 +5,11 @@ import glob
 INPUT_DIR   = "uncropped"
 OUTPUT_DIR  = "unsorted"
 
+MAX_CROPS   = 1000        # frames yielding more than this are discarded
+
 CROP_SIZE   = 32          # output patch is CROP_SIZE x CROP_SIZE (square)
 SAT_THRESH  = 40          # saturation (colour-purity) threshold, 0-255.
+MAX_SAT     = 120
                           # None => auto-estimate from image noise floor.
 MIN_AREA    = 16           # ignore blobs smaller than this (px)
 MAX_AREA    = 800          # ignore blobs larger than this (likely vegetation/lighting)
@@ -56,7 +59,7 @@ def process_frame(path, output_dir, sat_threshold, min_area, max_area):
     img = cv2.imread(path, cv2.IMREAD_COLOR)   # BGR
     if img is None:
         print(f"  !! could not read {path}")
-        return 0
+        return 0, 0, 0, False
 
     stem = os.path.splitext(os.path.basename(path))[0]
 
@@ -65,15 +68,19 @@ def process_frame(path, output_dir, sat_threshold, min_area, max_area):
         sat = cv2.GaussianBlur(sat, (BLUR_KSIZE, BLUR_KSIZE), 0)
 
     thr = sat_threshold if sat_threshold is not None else estimate_threshold(sat)
-    _, mask = cv2.threshold(sat, thr, 255, cv2.THRESH_BINARY)
+    _, mask = cv2.threshold(sat, thr, MAX_SAT, cv2.THRESH_BINARY)
 
-    n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=4)
 
-    saved = 0
-
+    pending = []                                # (out_name, patch, cx, cy)
+    print("total blobs: ", n)
     for i in range(1, n):                       # 0 is background
-        area = stats[i, cv2.CC_STAT_AREA]
+        area   = stats[i, cv2.CC_STAT_AREA]
+        width  = stats[i, cv2.CC_STAT_WIDTH]
+        height = stats[i, cv2.CC_STAT_HEIGHT]
         if area < min_area or area > max_area:
+            continue
+        if width > CROP_SIZE or height > CROP_SIZE:
             continue
 
         cx, cy = centroids[i]
@@ -84,20 +91,44 @@ def process_frame(path, output_dir, sat_threshold, min_area, max_area):
             continue
 
         out_name = f"{stem}__x{cx}_y{cy}_a{area}.png"
-        cv2.imwrite(os.path.join(output_dir, out_name), patch)
-        saved += 1
+        pending.append((out_name, patch, cx, cy))
 
-    return saved
+        # early exit: no point cropping 500 blobs we're about to throw away
+        if len(pending) > MAX_CROPS:
+            return n, 0, len(pending), True
+
+    preview = None
+
+    for out_name, patch, cx, cy in pending:
+        cv2.imwrite(os.path.join(output_dir, out_name), patch)
+        if preview is not None:
+            cv2.rectangle(preview,
+                          (cx - CROP_SIZE // 2, cy - CROP_SIZE // 2),
+                          (cx + CROP_SIZE // 2, cy + CROP_SIZE // 2),
+                          (0, 255, 0), 1)
+
+    if preview is not None:
+        os.makedirs("preview", exist_ok=True)
+        cv2.imwrite(os.path.join("preview", f"{stem}_preview.png"), preview)
+    return n, len(pending), len(pending), False
 
 
 def main():
+    max_n = 0
     parser = argparse.ArgumentParser(description="create crops of candidate blobs.")
     parser.add_argument("--input-dir", default=INPUT_DIR, help=f"source dir (default: {INPUT_DIR})")
     parser.add_argument("--output-dir", default=OUTPUT_DIR, help=f"output dir (default: {OUTPUT_DIR})")
-    parser.add_argument("--sat-threshold",type=int,default=SAT_THRESH,metavar="N|auto",help=f"saturation threshold. 0-255 (default: {SAT_THRESH})",)
+    parser.add_argument("--sat-threshold", type=int, default=SAT_THRESH, help=f"saturation threshold (0-255, default: {SAT_THRESH})")
     parser.add_argument("--min-area", type=int, default=MIN_AREA, help=f"minimum blob area (default: {MIN_AREA})")
     parser.add_argument("--max-area", type=int, default=MAX_AREA, help=f"maximum blob area (default: {MAX_AREA})")
     args = parser.parse_args()
+
+    if not 0 <= args.sat_threshold <= 255:
+        parser.error("--sat-threshold must be between 0 and 255")
+    if args.min_area < 0 or args.max_area < 0:
+        parser.error("--min-area and --max-area must be non-negative")
+    if args.min_area > args.max_area:
+        parser.error("--min-area cannot be greater than --max-area")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -110,12 +141,33 @@ def main():
         return
 
     total = 0
+    rejected_frames = 0
+    rejected_crops = 0
+
     for p in paths:
-        c = process_frame(p, args.output_dir, args.sat_threshold, args.min_area, args.max_area)
-        total += c
-        print(f"{os.path.basename(p):40s} -> {c} crops")
+        nmax, written, found, rejected = process_frame(
+            p,
+            args.output_dir,
+            args.sat_threshold,
+            args.min_area,
+            args.max_area,
+        )
+        if nmax > max_n:
+            max_n = nmax
+        total += written
+        if rejected:
+            rejected_frames += 1
+            rejected_crops += found
+            print(f"{os.path.basename(p):40s} -> SKIPPED ({found}+ blobs > MAX_CROPS={MAX_CROPS})")
+        else:
+            print(f"{os.path.basename(p):40s} -> {written} crops")
+
+    print("max blobs: ", max_n)
 
     print(f"\nDone. {total} crops written to '{args.output_dir}/'")
+    if rejected_frames:
+        print(f"Discarded {rejected_frames} frame(s) "
+              f"({rejected_crops}+ blobs) for exceeding MAX_CROPS={MAX_CROPS}")
 
 
 if __name__ == "__main__":
