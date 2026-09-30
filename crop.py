@@ -1,10 +1,7 @@
+import argparse
 import cv2, numpy as np, os
 import glob
-import cv2
 
-# ----------------------------------------------------------------------
-# CONFIG
-# ----------------------------------------------------------------------
 INPUT_DIR   = "uncropped"
 OUTPUT_DIR  = "unsorted"
 
@@ -15,10 +12,7 @@ MIN_AREA    = 16           # ignore blobs smaller than this (px)
 MAX_AREA    = 800          # ignore blobs larger than this (likely vegetation/lighting)
 PAD_EDGE    = True        # if True, pad crops that fall off the image edge
                           # if False, skip blobs too close to the border
-BLUR_KSIZE  = 0           # optional pre-blur of the saturation map (0 = off, else odd, e.g. 3)
-SAVE_MASK_PREVIEW = False # dump a debug overlay per frame to preview/ for tuning
-# ----------------------------------------------------------------------
-
+BLUR_KSIZE  = 3           # optional pre-blur of the saturation map (0 = off, else odd, e.g. 3)
 
 def compute_saturation(bgr):
     """Colour-purity map: max(channel) - min(channel).
@@ -58,7 +52,7 @@ def crop_patch(img, cx, cy, size, pad_edge):
     return patch
 
 
-def process_frame(path):
+def process_frame(path, output_dir, sat_threshold, min_area, max_area):
     img = cv2.imread(path, cv2.IMREAD_COLOR)   # BGR
     if img is None:
         print(f"  !! could not read {path}")
@@ -70,17 +64,16 @@ def process_frame(path):
     if BLUR_KSIZE >= 3:
         sat = cv2.GaussianBlur(sat, (BLUR_KSIZE, BLUR_KSIZE), 0)
 
-    thr = SAT_THRESH if SAT_THRESH is not None else estimate_threshold(sat)
+    thr = sat_threshold if sat_threshold is not None else estimate_threshold(sat)
     _, mask = cv2.threshold(sat, thr, 255, cv2.THRESH_BINARY)
 
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
 
     saved = 0
-    preview = img.copy() if SAVE_MASK_PREVIEW else None
 
     for i in range(1, n):                       # 0 is background
         area = stats[i, cv2.CC_STAT_AREA]
-        if area < MIN_AREA:
+        if area < min_area or area > max_area:
             continue
 
         cx, cy = centroids[i]
@@ -91,40 +84,38 @@ def process_frame(path):
             continue
 
         out_name = f"{stem}__x{cx}_y{cy}_a{area}.png"
-        cv2.imwrite(os.path.join(OUTPUT_DIR, out_name), patch)
+        cv2.imwrite(os.path.join(output_dir, out_name), patch)
         saved += 1
-
-        if preview is not None:
-            cv2.rectangle(preview,
-                          (cx - CROP_SIZE // 2, cy - CROP_SIZE // 2),
-                          (cx + CROP_SIZE // 2, cy + CROP_SIZE // 2),
-                          (0, 255, 0), 1)
-
-    if preview is not None:
-        os.makedirs("preview", exist_ok=True)
-        cv2.imwrite(os.path.join("preview", f"{stem}_preview.png"), preview)
 
     return saved
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(description="create crops of candidate blobs.")
+    parser.add_argument("--input-dir", default=INPUT_DIR, help=f"source dir (default: {INPUT_DIR})")
+    parser.add_argument("--output-dir", default=OUTPUT_DIR, help=f"output dir (default: {OUTPUT_DIR})")
+    parser.add_argument("--sat-threshold",type=int,default=SAT_THRESH,metavar="N|auto",help=f"saturation threshold. 0-255 (default: {SAT_THRESH})",)
+    parser.add_argument("--min-area", type=int, default=MIN_AREA, help=f"minimum blob area (default: {MIN_AREA})")
+    parser.add_argument("--max-area", type=int, default=MAX_AREA, help=f"maximum blob area (default: {MAX_AREA})")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
 
     paths = sorted(
-        glob.glob(os.path.join(INPUT_DIR, "*.png")) +
-        glob.glob(os.path.join(INPUT_DIR, "*.jpg"))
+        glob.glob(os.path.join(args.input_dir, "*.png")) +
+        glob.glob(os.path.join(args.input_dir, "*.jpg"))
     )
     if not paths:
-        print(f"No images found in '{INPUT_DIR}/'")
+        print(f"No images found in '{args.input_dir}/'")
         return
 
     total = 0
     for p in paths:
-        c = process_frame(p)
+        c = process_frame(p, args.output_dir, args.sat_threshold, args.min_area, args.max_area)
         total += c
         print(f"{os.path.basename(p):40s} -> {c} crops")
 
-    print(f"\nDone. {total} crops written to '{OUTPUT_DIR}/'")
+    print(f"\nDone. {total} crops written to '{args.output_dir}/'")
 
 
 if __name__ == "__main__":
