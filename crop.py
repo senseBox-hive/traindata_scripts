@@ -64,11 +64,17 @@ def process_frame(path, output_dir, sat_threshold, min_area, max_area):
     stem = os.path.splitext(os.path.basename(path))[0]
 
     sat = compute_saturation(img)
+    os.makedirs("frames_sat", exist_ok=True)
+    os.makedirs("frames_sat_blur", exist_ok=True)
+    cv2.imwrite(os.path.join("frames_sat", f"{stem}.png"), sat)
     if BLUR_KSIZE >= 3:
         sat = cv2.GaussianBlur(sat, (BLUR_KSIZE, BLUR_KSIZE), 0)
+    cv2.imwrite(os.path.join("frames_sat_blur", f"{stem}.png"), sat)
 
     thr = sat_threshold if sat_threshold is not None else estimate_threshold(sat)
     _, mask = cv2.threshold(sat, thr, MAX_SAT, cv2.THRESH_BINARY)
+    os.makedirs("frames_thresh", exist_ok=True)
+    cv2.imwrite(os.path.join("frames_thresh", f"{stem}.png"), mask)
 
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=4)
 
